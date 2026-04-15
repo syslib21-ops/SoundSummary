@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <title>음성 → 텍스트</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("stt-theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+          return;
+        }
+      } catch (e) {}
+      try {
+        if (window.matchMedia("(prefers-color-scheme: light)").matches) {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      } catch (e2) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="page-backdrop" aria-hidden="true"></div>
+  <div class="app">
+    <header class="header">
+      <div class="header-row">
+        <div class="header-main">
+          <p class="eyebrow">로컬 변환 · Web Worker</p>
+          <h1 class="title">음성 <span class="title-arrow">→</span> 텍스트</h1>
+          <p class="subtitle">녹음 파일을 올리거나 마이크로 말하면 텍스트로 변환합니다.</p>
+        </div>
+        <div class="theme-switch" role="group" aria-label="화면 테마">
+          <button type="button" class="theme-switch__btn is-active" id="themeDark" data-set-theme="dark" aria-pressed="true">다크</button>
+          <button type="button" class="theme-switch__btn" id="themeLight" data-set-theme="light" aria-pressed="false">라이트</button>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="입력 방식">
+      <button type="button" class="tab is-active" data-tab="file" role="tab" aria-selected="true">파일 업로드</button>
+      <button type="button" class="tab" data-tab="mic" role="tab" aria-selected="false">마이크 (실시간)</button>
+    </nav>
+
+    <section id="panel-file" class="panel is-visible card" role="tabpanel">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept="audio/*,.webm,.mp3,.wav,.ogg,.m4a,.flac" hidden />
+        <span class="dropzone-icon" aria-hidden="true">
+          <svg class="dropzone-svg" width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 15V3M12 3L8 7M12 3L16 7" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 14v4a2 2 0 002 2h12a2 2 0 002-2v-4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="dropzone-text">탭하여 선택 · 여기에 끌어다 놓기</span>
+        <span class="dropzone-hint">MP3 · WAV · WebM · OGG · M4A · FLAC</span>
+      </label>
+      <p id="fileName" class="file-name" hidden></p>
+      <div class="options" aria-label="파일 변환 옵션">
+        <label class="field">
+          <span class="field-label">인식 모델</span>
+          <select id="modelSelect" class="select">
+            <option value="base" selected>균형 (권장, whisper-base)</option>
+            <option value="small">더 정확 (느림·용량 큼, whisper-small)</option>
+            <option value="tiny">빠름 (정확도 낮음, whisper-tiny)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">언어</span>
+          <select id="languageSelect" class="select">
+            <option value="auto" selected>자동 감지</option>
+            <option value="korean">한국어로 고정</option>
+            <option value="english">영어로 고정</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">긴 녹음 처리</span>
+          <select id="speedSelect" class="select">
+            <option value="balanced" selected>균형 (겹침 5초)</option>
+            <option value="fast">속도 우선 (겹침 2초)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button type="button" class="btn btn-primary" id="btnTranscribeFile" disabled>파일을 텍스트로 변환</button>
+        <button type="button" class="btn btn-ghost" id="btnClearFile">초기화</button>
+      </div>
+      <p class="note">
+        변환은 <strong>Worker</strong>에서 수행됩니다. <strong>http(s)</strong>로 열어 주세요. 첫 실행 시 모델 다운로드(base 약 150MB)가 필요합니다.
+        <strong>속도</strong>: 모델을 <strong>tiny</strong>로 하거나 「긴 녹음 처리 → 속도 우선」을 선택하면 긴 파일에서 청크 겹침 연산이 줄어듭니다. 서버에 <code>Cross-Origin-Opener-Policy</code>·<code>Cross-Origin-Embedder-Policy</code>를 넣으면 WASM 멀티스레드로 더 빨라질 수 있습니다.
+      </p>
+    </section>
+
+    <section id="panel-mic" class="panel card" role="tabpanel" hidden>
+      <p class="mic-hint">Chrome·Edge 권장. 브라우저가 마이크 권한을 요청합니다.</p>
+      <div class="row">
+        <button type="button" class="btn btn-primary" id="btnMicStart">듣기 시작</button>
+        <button type="button" class="btn btn-danger" id="btnMicStop" disabled>중지</button>
+      </div>
+      <p id="micStatus" class="status" aria-live="polite"></p>
+    </section>
+
+    <div id="progressWrap" class="progress-wrap card card--compact" hidden>
+      <div class="progress-label" id="progressLabel">준비 중…</div>
+      <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" id="progressFill"></div></div>
+    </div>
+
+    <section class="output-section card">
+      <div class="output-header">
+        <h2>변환 결과</h2>
+        <div class="output-actions">
+          <button type="button" class="btn btn-ghost btn-small" id="btnCopy" disabled>복사</button>
+          <button type="button" class="btn btn-ghost btn-small" id="btnSaveFull" disabled>저장(.txt)</button>
+        </div>
+      </div>
+      <textarea id="output" class="output" readonly rows="12" placeholder="여기에 변환된 텍스트가 표시됩니다."></textarea>
+    </section>
+
+    <section class="summary-section card card--accent">
+      <div class="output-header">
+        <h2>핵심 요약</h2>
+        <div class="output-actions">
+          <button type="button" class="btn btn-ghost btn-small" id="btnRefreshSummary" disabled>요약 다시</button>
+          <button type="button" class="btn btn-ghost btn-small" id="btnSaveSummary" disabled>요약 저장(.txt)</button>
+        </div>
+      </div>
+      <p class="summary-hint">
+        파일 변환 직후에는 자동으로 요약합니다. 마이크 입력 후에는 <strong>요약 다시</strong>를 눌러 주세요. (브라우저만으로 동작하는 추출식 요약)
+      </p>
+      <textarea id="summaryOutput" class="output output-summary" readonly rows="7" placeholder="요약이 여기에 표시됩니다."></textarea>
+    </section>
+
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <dialog id="saveDialog" class="save-dialog" aria-labelledby="saveDialogTitle">
+      <div class="save-dialog__inner">
+        <h3 id="saveDialogTitle" class="save-dialog__title">텍스트 저장</h3>
+        <p id="saveDialogNote" class="save-dialog__note"></p>
+        <label class="field">
+          <span class="field-label">파일명</span>
+          <input type="text" id="saveDialogFileName" class="save-dialog__input" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="save-dialog__actions">
+          <button type="button" class="btn btn-ghost" id="saveDialogCancel">취소</button>
+          <button type="button" class="btn btn-primary" id="saveDialogConfirm">저장</button>
+        </div>
+      </div>
+    </dialog>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
