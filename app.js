@@ -189,6 +189,15 @@ function clearSummaryCoreOutput() {
   els.btnSaveSummaryCore.disabled = true;
 }
 
+/** 텍스트 클리어가 화면에 반영된 뒤 이어서 작업하기 위한 짧은 대기 */
+function flushPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
+    });
+  });
+}
+
 /** 변환 전체 → 1차 요약 → 2차 요약(1차 기준) */
 function applyPrimaryAndCoreSummary(fullText) {
   const primary = buildExtractiveSummary(fullText, SUMMARY_PRIMARY_MAX).trim();
@@ -222,7 +231,7 @@ function scheduleSummaryGeneration(fullText) {
   }
 }
 
-function refreshSummaryFromOutput() {
+async function refreshSummaryFromOutput() {
   const full = els.output.value.trim();
   if (!full) return;
   els.btnRefreshSummary.disabled = true;
@@ -231,6 +240,7 @@ function refreshSummaryFromOutput() {
   clearSummaryCoreOutput();
   els.btnSaveSummary.disabled = true;
   els.btnRefreshSummaryCore.disabled = true;
+  await flushPaint();
   try {
     setProgress(true, "1차 핵심 요약…", 35);
     applyPrimaryAndCoreSummary(full);
@@ -244,13 +254,14 @@ function refreshSummaryFromOutput() {
 }
 
 /** 현재 1차 핵심 요약만으로 2차만 다시 계산 */
-function refreshSummaryCoreFromSummary() {
+async function refreshSummaryCoreFromSummary() {
   const primary = els.summaryOutput.value.trim();
   if (!primary) return;
   els.btnRefreshSummaryCore.disabled = true;
   showError("");
   els.summaryCoreOutput.value = "";
   els.btnSaveSummaryCore.disabled = true;
+  await flushPaint();
   try {
     setProgress(true, "2차 요약 다시…", 55);
     const core = buildExtractiveSummary(primary, SUMMARY_CORE_MAX).trim();
