@@ -69,13 +69,19 @@ function showError(msg) {
   els.error.hidden = !msg;
 }
 
+/** 1·2차 저장 버튼과 동일 조건으로 복사 가능 여부를 맞춤 (textarea 값과 어긋남 방지) */
 function syncSummaryCopyButtons() {
-  if (els.btnCopySummary) {
-    els.btnCopySummary.disabled = !els.summaryOutput.value.trim();
+  if (els.btnCopySummary && els.btnSaveSummary) {
+    els.btnCopySummary.disabled = els.btnSaveSummary.disabled;
   }
-  if (els.btnCopySummaryCore) {
-    els.btnCopySummaryCore.disabled = !els.summaryCoreOutput.value.trim();
+  if (els.btnCopySummaryCore && els.btnSaveSummaryCore) {
+    els.btnCopySummaryCore.disabled = els.btnSaveSummaryCore.disabled;
   }
+}
+
+function syncSummaryCopyButtonsSoon() {
+  syncSummaryCopyButtons();
+  queueMicrotask(() => syncSummaryCopyButtons());
 }
 
 /**
@@ -133,9 +139,8 @@ function setOutput(text, opts = {}) {
     els.summaryCoreOutput.value = "";
     els.btnSaveSummary.disabled = true;
     els.btnSaveSummaryCore.disabled = true;
-    els.btnCopySummary.disabled = true;
-    els.btnCopySummaryCore.disabled = true;
     els.btnRefreshSummaryCore.disabled = true;
+    syncSummaryCopyButtons();
   } else if (!skipSummary) {
     els.btnSaveSummary.disabled = true;
     scheduleSummaryGeneration(full);
@@ -144,7 +149,7 @@ function setOutput(text, opts = {}) {
     const hasCore = els.summaryCoreOutput.value.trim().length > 0;
     els.btnSaveSummaryCore.disabled = !hasCore;
     els.btnRefreshSummaryCore.disabled = !els.summaryOutput.value.trim();
-    syncSummaryCopyButtons();
+    syncSummaryCopyButtonsSoon();
   }
 }
 
@@ -233,7 +238,7 @@ function buildExtractiveSummary(text, maxBullets = 6) {
 function clearSummaryCoreOutput() {
   els.summaryCoreOutput.value = "";
   els.btnSaveSummaryCore.disabled = true;
-  if (els.btnCopySummaryCore) els.btnCopySummaryCore.disabled = true;
+  syncSummaryCopyButtons();
 }
 
 /** 텍스트 클리어가 화면에 반영된 뒤 이어서 작업하기 위한 짧은 대기 */
@@ -253,7 +258,7 @@ function applyPrimaryAndCoreSummary(fullText) {
   if (!primary) {
     clearSummaryCoreOutput();
     els.btnRefreshSummaryCore.disabled = true;
-    syncSummaryCopyButtons();
+    syncSummaryCopyButtonsSoon();
     return;
   }
   setProgress(true, "2차 요약(핵심의 핵심)…", 72);
@@ -261,7 +266,7 @@ function applyPrimaryAndCoreSummary(fullText) {
   els.summaryCoreOutput.value = core;
   els.btnSaveSummaryCore.disabled = !core;
   els.btnRefreshSummaryCore.disabled = false;
-  syncSummaryCopyButtons();
+  syncSummaryCopyButtonsSoon();
 }
 
 function scheduleSummaryGeneration(fullText) {
@@ -275,7 +280,7 @@ function scheduleSummaryGeneration(fullText) {
     clearSummaryCoreOutput();
     els.btnSaveSummary.disabled = true;
     els.btnRefreshSummaryCore.disabled = true;
-    syncSummaryCopyButtons();
+    syncSummaryCopyButtonsSoon();
   } finally {
     setTimeout(() => setProgress(false), 250);
   }
@@ -290,8 +295,7 @@ async function refreshSummaryFromOutput() {
   clearSummaryCoreOutput();
   els.btnSaveSummary.disabled = true;
   els.btnRefreshSummaryCore.disabled = true;
-  if (els.btnCopySummary) els.btnCopySummary.disabled = true;
-  if (els.btnCopySummaryCore) els.btnCopySummaryCore.disabled = true;
+  syncSummaryCopyButtons();
   await flushPaint();
   try {
     setProgress(true, "1차 핵심 요약…", 35);
@@ -299,7 +303,7 @@ async function refreshSummaryFromOutput() {
   } catch (err) {
     console.error(err);
     showError("요약에 실패했습니다.");
-    syncSummaryCopyButtons();
+    syncSummaryCopyButtonsSoon();
   } finally {
     els.btnRefreshSummary.disabled = false;
     setTimeout(() => setProgress(false), 250);
@@ -314,18 +318,18 @@ async function refreshSummaryCoreFromSummary() {
   showError("");
   els.summaryCoreOutput.value = "";
   els.btnSaveSummaryCore.disabled = true;
-  if (els.btnCopySummaryCore) els.btnCopySummaryCore.disabled = true;
+  syncSummaryCopyButtons();
   await flushPaint();
   try {
     setProgress(true, "2차 요약 다시…", 55);
     const core = buildExtractiveSummary(primary, SUMMARY_CORE_MAX).trim();
     els.summaryCoreOutput.value = core;
     els.btnSaveSummaryCore.disabled = !core;
-    syncSummaryCopyButtons();
+    syncSummaryCopyButtonsSoon();
   } catch (err) {
     console.error(err);
     showError("2차 요약에 실패했습니다.");
-    syncSummaryCopyButtons();
+    syncSummaryCopyButtonsSoon();
   } finally {
     els.btnRefreshSummaryCore.disabled = false;
     setTimeout(() => setProgress(false), 250);
@@ -940,3 +944,4 @@ setupSaveDialog();
 setupThemeToggle();
 initThemeFromDocument();
 warnIfFileProtocol();
+syncSummaryCopyButtonsSoon();
