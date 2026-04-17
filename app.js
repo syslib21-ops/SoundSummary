@@ -153,6 +153,21 @@ function setOutput(text, opts = {}) {
   }
 }
 
+/** 변환 결과를 직접 고칠 때: 상단 버튼 상태를 맞추고, 본문이 비면 요약 영역도 비웁니다. */
+function syncUiAfterOutputEdit() {
+  const has = els.output.value.trim().length > 0;
+  els.btnCopy.disabled = !has;
+  els.btnSaveFull.disabled = !has;
+  els.btnRefreshSummary.disabled = !has;
+  if (!has) {
+    els.summaryOutput.value = "";
+    clearSummaryCoreOutput();
+    els.btnSaveSummary.disabled = true;
+    els.btnRefreshSummaryCore.disabled = true;
+    syncSummaryCopyButtons();
+  }
+}
+
 function tokenizeForKeywords(text) {
   return text
     .toLowerCase()
@@ -831,6 +846,10 @@ els.btnCopy.addEventListener("click", async () => {
     els.output.select();
     document.execCommand("copy");
   }
+});
+
+els.output?.addEventListener("input", () => {
+  syncUiAfterOutputEdit();
 });
 
 els.btnCopySummary?.addEventListener("click", async () => {
