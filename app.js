@@ -227,6 +227,10 @@ function refreshSummaryFromOutput() {
   if (!full) return;
   els.btnRefreshSummary.disabled = true;
   showError("");
+  els.summaryOutput.value = "";
+  clearSummaryCoreOutput();
+  els.btnSaveSummary.disabled = true;
+  els.btnRefreshSummaryCore.disabled = true;
   try {
     setProgress(true, "1차 핵심 요약…", 35);
     applyPrimaryAndCoreSummary(full);
@@ -245,6 +249,8 @@ function refreshSummaryCoreFromSummary() {
   if (!primary) return;
   els.btnRefreshSummaryCore.disabled = true;
   showError("");
+  els.summaryCoreOutput.value = "";
+  els.btnSaveSummaryCore.disabled = true;
   try {
     setProgress(true, "2차 요약 다시…", 55);
     const core = buildExtractiveSummary(primary, SUMMARY_CORE_MAX).trim();
