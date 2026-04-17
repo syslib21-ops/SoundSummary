@@ -37,6 +37,9 @@ const els = {
   btnSaveFull: $("btnSaveFull"),
   btnSaveSummary: $("btnSaveSummary"),
   btnRefreshSummary: $("btnRefreshSummary"),
+  summaryCoreOutput: $("summaryCoreOutput"),
+  btnRefreshSummaryCore: $("btnRefreshSummaryCore"),
+  btnSaveSummaryCore: $("btnSaveSummaryCore"),
   error: $("error"),
   themeDark: $("themeDark"),
   themeLight: $("themeLight"),
@@ -49,6 +52,10 @@ const els = {
 };
 
 const THEME_STORAGE_KEY = "stt-theme";
+/** 1차: 변환 전체 → 핵심 줄 수 */
+const SUMMARY_PRIMARY_MAX = 6;
+/** 2차: 핵심 요약 → 더 짧게 */
+const SUMMARY_CORE_MAX = 3;
 
 let selectedFile = null;
 /** @type {Worker | null} */
@@ -80,12 +87,18 @@ function setOutput(text, opts = {}) {
   els.btnRefreshSummary.disabled = !has;
   if (!has) {
     els.summaryOutput.value = "";
+    els.summaryCoreOutput.value = "";
     els.btnSaveSummary.disabled = true;
+    els.btnSaveSummaryCore.disabled = true;
+    els.btnRefreshSummaryCore.disabled = true;
   } else if (!skipSummary) {
     els.btnSaveSummary.disabled = true;
     scheduleSummaryGeneration(full);
   } else {
     els.btnSaveSummary.disabled = !els.summaryOutput.value.trim();
+    const hasCore = els.summaryCoreOutput.value.trim().length > 0;
+    els.btnSaveSummaryCore.disabled = !hasCore;
+    els.btnRefreshSummaryCore.disabled = !els.summaryOutput.value.trim();
   }
 }
 
@@ -171,17 +184,39 @@ function buildExtractiveSummary(text, maxBullets = 6) {
   return picked.map(({ s }, i) => `${i + 1}. ${s}`).join("\n");
 }
 
+function clearSummaryCoreOutput() {
+  els.summaryCoreOutput.value = "";
+  els.btnSaveSummaryCore.disabled = true;
+}
+
+/** 변환 전체 → 1차 요약 → 2차 요약(1차 기준) */
+function applyPrimaryAndCoreSummary(fullText) {
+  const primary = buildExtractiveSummary(fullText, SUMMARY_PRIMARY_MAX).trim();
+  els.summaryOutput.value = primary;
+  els.btnSaveSummary.disabled = !primary;
+  if (!primary) {
+    clearSummaryCoreOutput();
+    els.btnRefreshSummaryCore.disabled = true;
+    return;
+  }
+  setProgress(true, "2차 요약(핵심의 핵심)…", 72);
+  const core = buildExtractiveSummary(primary, SUMMARY_CORE_MAX).trim();
+  els.summaryCoreOutput.value = core;
+  els.btnSaveSummaryCore.disabled = !core;
+  els.btnRefreshSummaryCore.disabled = false;
+}
+
 function scheduleSummaryGeneration(fullText) {
   try {
-    setProgress(true, "요약 중…", 40);
-    const out = buildExtractiveSummary(fullText, 6);
-    els.summaryOutput.value = out.trim();
-    els.btnSaveSummary.disabled = !out.trim();
+    setProgress(true, "1차 핵심 요약…", 35);
+    applyPrimaryAndCoreSummary(fullText);
   } catch (err) {
     console.error(err);
     showError("요약에 실패했습니다.");
     els.summaryOutput.value = "";
+    clearSummaryCoreOutput();
     els.btnSaveSummary.disabled = true;
+    els.btnRefreshSummaryCore.disabled = true;
   } finally {
     setTimeout(() => setProgress(false), 250);
   }
@@ -193,15 +228,33 @@ function refreshSummaryFromOutput() {
   els.btnRefreshSummary.disabled = true;
   showError("");
   try {
-    setProgress(true, "요약 중…", 40);
-    const out = buildExtractiveSummary(full, 6);
-    els.summaryOutput.value = out.trim();
-    els.btnSaveSummary.disabled = !out.trim();
+    setProgress(true, "1차 핵심 요약…", 35);
+    applyPrimaryAndCoreSummary(full);
   } catch (err) {
     console.error(err);
     showError("요약에 실패했습니다.");
   } finally {
     els.btnRefreshSummary.disabled = false;
+    setTimeout(() => setProgress(false), 250);
+  }
+}
+
+/** 현재 1차 핵심 요약만으로 2차만 다시 계산 */
+function refreshSummaryCoreFromSummary() {
+  const primary = els.summaryOutput.value.trim();
+  if (!primary) return;
+  els.btnRefreshSummaryCore.disabled = true;
+  showError("");
+  try {
+    setProgress(true, "2차 요약 다시…", 55);
+    const core = buildExtractiveSummary(primary, SUMMARY_CORE_MAX).trim();
+    els.summaryCoreOutput.value = core;
+    els.btnSaveSummaryCore.disabled = !core;
+  } catch (err) {
+    console.error(err);
+    showError("2차 요약에 실패했습니다.");
+  } finally {
+    els.btnRefreshSummaryCore.disabled = false;
     setTimeout(() => setProgress(false), 250);
   }
 }
@@ -715,8 +768,18 @@ els.btnSaveSummary.addEventListener("click", async () => {
   await saveTextWithLocationAndName(t, "음성변환_요약", "요약 결과 저장");
 });
 
+els.btnSaveSummaryCore.addEventListener("click", async () => {
+  const t = els.summaryCoreOutput.value.trim();
+  if (!t) return;
+  await saveTextWithLocationAndName(t, "음성변환_핵심의핵심", "2차 요약 저장");
+});
+
 els.btnRefreshSummary.addEventListener("click", () => {
   void refreshSummaryFromOutput();
+});
+
+els.btnRefreshSummaryCore.addEventListener("click", () => {
+  void refreshSummaryCoreFromSummary();
 });
 
 function readStoredTheme() {

@@ -665,10 +665,34 @@ body {
   line-height: 1.5;
 }
 
+.summary-hint--tight {
+  margin-top: 0.35rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.72rem;
+}
+
+.summary-core-block {
+  margin-top: 1.1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.summary-core-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-soft);
+}
+
 .output-summary {
   min-height: 120px;
   font-family: var(--font-sans);
   font-weight: 500;
+}
+
+.output-summary--core {
+  min-height: 96px;
 }
 
 .output {

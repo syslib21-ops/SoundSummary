@@ -130,9 +130,23 @@
         </div>
       </div>
       <p class="summary-hint">
-        파일 변환 직후에는 자동으로 요약합니다. 마이크 입력 후에는 <strong>요약 다시</strong>를 눌러 주세요. (브라우저만으로 동작하는 추출식 요약)
+        <strong>변환 결과</strong>로 1차 핵심 요약을 만들고, 그다음 같은 방식으로 <strong>한 번 더 압축</strong>한 2차 요약을 채웁니다. 마이크 입력 후에는 먼저 <strong>요약 다시</strong>를 눌러 주세요.
       </p>
-      <textarea id="summaryOutput" class="output output-summary" readonly rows="7" placeholder="요약이 여기에 표시됩니다."></textarea>
+      <textarea id="summaryOutput" class="output output-summary" readonly rows="7" placeholder="1차 핵심 요약(변환 결과 기준)"></textarea>
+
+      <div class="summary-core-block">
+        <div class="output-header">
+          <h3 class="summary-core-title">핵심의 핵심</h3>
+          <div class="output-actions">
+            <button type="button" class="btn btn-ghost btn-small" id="btnRefreshSummaryCore" disabled>2차 요약 다시</button>
+            <button type="button" class="btn btn-ghost btn-small" id="btnSaveSummaryCore" disabled>2차 저장(.txt)</button>
+          </div>
+        </div>
+        <p class="summary-hint summary-hint--tight">
+          위 <strong>핵심 요약</strong>만 입력으로 다시 추출식 요약합니다. (1차가 바뀌면 2차도 함께 다시 계산됩니다.)
+        </p>
+        <textarea id="summaryCoreOutput" class="output output-summary output-summary--core" readonly rows="5" placeholder="2차 요약(핵심 요약 기준)"></textarea>
+      </div>
     </section>
 
     <p id="error" class="error" role="alert" hidden></p>
