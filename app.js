@@ -15,18 +15,23 @@ const WHISPER_MODELS = {
 const els = {
   tabs: document.querySelectorAll(".tab"),
   panelFile: $("panel-file"),
+  panelRecord: $("panel-record"),
   panelMic: $("panel-mic"),
   dropzone: $("dropzone"),
   fileInput: $("fileInput"),
   fileName: $("fileName"),
   modelSelect: $("modelSelect"),
-  languageSelect: $("languageSelect"),
   speedSelect: $("speedSelect"),
   btnTranscribeFile: $("btnTranscribeFile"),
   btnClearFile: $("btnClearFile"),
   btnMicStart: $("btnMicStart"),
   btnMicStop: $("btnMicStop"),
   micStatus: $("micStatus"),
+  btnRecordStart: $("btnRecordStart"),
+  btnRecordStop: $("btnRecordStop"),
+  btnSaveRecording: $("btnSaveRecording"),
+  btnRecordTranscribe: $("btnRecordTranscribe"),
+  recordStatus: $("recordStatus"),
   progressWrap: $("progressWrap"),
   progressLabel: $("progressLabel"),
   progressFill: $("progressFill"),
@@ -63,6 +68,25 @@ let selectedFile = null;
 /** @type {Worker | null} */
 let transcribeWorker = null;
 let micRecognition = null;
+/** 마이크 실시간: 확정 슬롯은 한 번만 이어 붙임(results 재스캔 시 깜빡임·중복 완화) */
+let micCommittedRaw = "";
+let micLastFinalIdx = -1;
+
+/** @type {MediaStream | null} */
+let recordStream = null;
+/** @type {MediaRecorder | null} */
+let recordMediaRecorder = null;
+/** @type {BlobPart[]} */
+let recordChunks = [];
+/** 탭 전환 등으로 녹음을 버릴 때 onstop에서 변환하지 않음 */
+let recordDiscardOnStop = false;
+
+/** @type {Blob | null} */
+let lastRecordedAudioBlob = null;
+let lastRecordedAudioExt = "webm";
+
+/** 마지막으로 선택된 입력 탭(`mic` | `record` | `file`) — 탭 전환 시에만 변환 결과를 비웁니다 */
+let activeInputTab = "file";
 
 function showError(msg) {
   els.error.textContent = msg;
@@ -363,6 +387,102 @@ function saveTextFile(filename, content) {
   URL.revokeObjectURL(a.href);
 }
 
+function saveBlobAsDownload(filename, blob) {
+  const a = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function extFromAudioMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("webm")) return "webm";
+  if (m.includes("ogg")) return "ogg";
+  if (m.includes("mp4") || m.includes("mpeg")) return "mp4";
+  return "webm";
+}
+
+/** 녹음 등 바이너리 파일명 (.webm·.ogg 등) */
+function sanitizeAudioDownloadFileName(name, extFallback) {
+  const ext = extFallback || "webm";
+  let s = basenameFromPath(String(name || "").trim());
+  if (!s) s = `음성녹음_${defaultDownloadBasename()}.${ext}`;
+  s = s.replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim();
+  const low = s.toLowerCase();
+  const ok = [".webm", ".ogg", ".opus", ".mp4", ".m4a"];
+  if (!ok.some((a) => low.endsWith(a))) {
+    const base = s.replace(/\.[^/.]+$/, "");
+    s = `${base || `음성녹음_${defaultDownloadBasename()}`}.${ext}`;
+  }
+  if (s.length > 180) s = `${s.slice(0, 172)}.${ext}`;
+  return s;
+}
+
+/**
+ * @returns {Promise<"saved"|"aborted"|"noapi"|"failed">}
+ */
+async function trySaveBlobWithNativePicker(blob, suggestedName) {
+  const picker = window.showSaveFilePicker;
+  if (typeof picker !== "function") return "noapi";
+  const ext = lastRecordedAudioExt || "webm";
+  try {
+    const handle = await picker.call(window, {
+      suggestedName: sanitizeAudioDownloadFileName(suggestedName, ext),
+      types: [
+        {
+          description: "오디오",
+          accept: {
+            "audio/webm": [".webm"],
+            "audio/ogg": [".ogg", ".opus"],
+            "audio/mp4": [".m4a", ".mp4"],
+          },
+        },
+      ],
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return "saved";
+  } catch (e) {
+    if (e?.name === "AbortError") return "aborted";
+    console.warn(e);
+    return "failed";
+  }
+}
+
+async function saveLastRecordedAudio() {
+  if (!lastRecordedAudioBlob || !lastRecordedAudioBlob.size) return;
+  const suggested = `음성녹음_${defaultDownloadBasename()}.${lastRecordedAudioExt}`;
+  const native = await trySaveBlobWithNativePicker(
+    lastRecordedAudioBlob,
+    suggested
+  );
+  if (native === "saved" || native === "aborted") return;
+  saveBlobAsDownload(
+    sanitizeAudioDownloadFileName(suggested, lastRecordedAudioExt),
+    lastRecordedAudioBlob
+  );
+}
+
+function rememberLastRecordedAudio(blob, mime) {
+  lastRecordedAudioBlob = blob;
+  lastRecordedAudioExt = extFromAudioMime(mime);
+  if (els.btnSaveRecording) els.btnSaveRecording.disabled = false;
+  if (els.btnRecordTranscribe) els.btnRecordTranscribe.disabled = false;
+}
+
+function clearLastRecordedAudio() {
+  lastRecordedAudioBlob = null;
+  lastRecordedAudioExt = "webm";
+  if (els.btnSaveRecording) els.btnSaveRecording.disabled = true;
+  if (els.btnRecordTranscribe) els.btnRecordTranscribe.disabled = true;
+}
+
 function basenameFromPath(name) {
   return String(name || "")
     .trim()
@@ -460,7 +580,7 @@ function defaultDownloadBasename() {
 
 /**
  * Whisper 파이프라인 반환값을 한 덩어리 문자열로 정리합니다.
- * (청크·타임스탬프 모드에서 chunks만 채워지는 경우가 있어 누락을 막습니다.)
+ * 긴 오디오는 chunks만 채이거나 text와 함께 올 수 있어, 짧은 쪽만 쓰면 누락이 납니다.
  */
 function normalizeAsrResult(result) {
   if (result == null) return "";
@@ -468,15 +588,20 @@ function normalizeAsrResult(result) {
   if (Array.isArray(result)) {
     return result.map(normalizeAsrResult).filter(Boolean).join(" ").trim();
   }
+  const top = typeof result.text === "string" ? result.text.trim() : "";
   const chunks = result.chunks;
   if (Array.isArray(chunks) && chunks.length) {
     const fromChunks = chunks
       .map((c) => (typeof c === "string" ? c : (c && c.text) || ""))
+      .map((t) => t.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
       .join(" ")
       .trim();
+    if (fromChunks && top) {
+      return fromChunks.length >= top.length ? fromChunks : top;
+    }
     if (fromChunks) return fromChunks;
   }
-  const top = typeof result.text === "string" ? result.text.trim() : "";
   return top;
 }
 
@@ -490,21 +615,22 @@ function getSelectedModelId() {
  * @param {number | null} durationSec 실제 PCM 기준 길이(초) 권장
  */
 function getTranscribeOptions(durationSec) {
-  const lang = els.languageSelect?.value || "auto";
   const speedPreset = els.speedSelect?.value || "balanced";
   /** @type {Record<string, unknown>} */
   const opts = {
     task: "transcribe",
+    language: "korean",
   };
   const longForm =
     durationSec == null || !Number.isFinite(durationSec) || durationSec > 28;
   if (longForm) {
-    opts.chunk_length_s = 30;
-    // 겹침이 클수록 경계 품질↑·연산↑. 속도 우선은 겹침만 줄임(경계 문장 품질은 약간↓ 가능).
-    opts.stride_length_s = speedPreset === "fast" ? 2 : 5;
+    // 30s 청크는 일부 환경에서 타임스탬프/경계 이슈 보고 → 29s 권장에 맞춤
+    opts.chunk_length_s = 29;
+    // stride_length_s = 청크 간 겹침(초). 클수록 경계에서 단어 누락·반복이 줄고 연산은 늘어남.
+    if (speedPreset === "fast") opts.stride_length_s = 2;
+    else if (speedPreset === "quality") opts.stride_length_s = 10;
+    else opts.stride_length_s = 6;
   }
-  if (lang === "korean") opts.language = "korean";
-  else if (lang === "english") opts.language = "english";
   return opts;
 }
 
@@ -550,10 +676,16 @@ async function decodeFileToWhisperSamples(arrayBuffer) {
     src.start(0);
     const rendered = await offline.startRendering();
     const ch0 = rendered.getChannelData(0);
-    const samples = new Float32Array(ch0);
-    const durationSec = Number.isFinite(duration)
-      ? duration
-      : samples.length / WHISPER_SAMPLE_RATE;
+    const core = new Float32Array(ch0);
+    const durationSec =
+      Number.isFinite(duration) && duration > 0
+        ? duration
+        : core.length / WHISPER_SAMPLE_RATE;
+    // 마지막 음절/어미가 잘리는 현상 완화(무음 꼬리). 청크 길이 판단은 원본 durationSec 기준.
+    const tailPadSec = 0.35;
+    const pad = Math.round(tailPadSec * WHISPER_SAMPLE_RATE);
+    const samples = new Float32Array(core.length + pad);
+    samples.set(core);
     return { samples, durationSec };
   } finally {
     await ctx.close();
@@ -659,6 +791,7 @@ function transcribeWithWorker(file) {
 
 async function transcribeFile(file) {
   showError("");
+  setOutput("", { skipSummary: true });
   setProgress(true, "오디오·모델 준비 중…", 10);
   try {
     const result = await transcribeWithWorker(file);
@@ -669,27 +802,88 @@ async function transcribeFile(file) {
   }
 }
 
+function stopMicRecognitionIfAny() {
+  if (micRecognition) {
+    try {
+      micRecognition.stop();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function stopRecordStreamTracks() {
+  if (recordStream) {
+    try {
+      recordStream.getTracks().forEach((t) => t.stop());
+    } catch {
+      /* ignore */
+    }
+    recordStream = null;
+  }
+}
+
+/** 녹음 UI만 초기화(스트림은 이미 정리된 뒤 호출 가능) */
+function resetRecordUiIdle() {
+  recordMediaRecorder = null;
+  recordChunks = [];
+  if (els.btnRecordStart) els.btnRecordStart.disabled = false;
+  if (els.btnRecordStop) els.btnRecordStop.disabled = true;
+}
+
+/**
+ * 녹음 중이면 중단하고 변환은 하지 않습니다(다른 탭으로 나갈 때).
+ */
+function abortRecordSession() {
+  if (recordMediaRecorder && recordMediaRecorder.state === "recording") {
+    recordDiscardOnStop = true;
+    try {
+      recordMediaRecorder.stop();
+    } catch {
+      recordDiscardOnStop = false;
+      stopRecordStreamTracks();
+      resetRecordUiIdle();
+    }
+  } else {
+    stopRecordStreamTracks();
+    resetRecordUiIdle();
+  }
+}
+
 function setupTabs() {
   els.tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       const name = tab.dataset.tab;
+      if (
+        name &&
+        (name === "mic" || name === "record" || name === "file") &&
+        name !== activeInputTab
+      ) {
+        setOutput("", { skipSummary: true });
+        activeInputTab = name;
+      }
       els.tabs.forEach((t) => {
         const on = t === tab;
         t.classList.toggle("is-active", on);
         t.setAttribute("aria-selected", on);
       });
       const fileMode = name === "file";
+      const recordMode = name === "record";
+      const micMode = name === "mic";
+
+      if (!recordMode) {
+        abortRecordSession();
+      }
+      if (!micMode) {
+        stopMicRecognitionIfAny();
+      }
+
       els.panelFile.classList.toggle("is-visible", fileMode);
       els.panelFile.hidden = !fileMode;
-      els.panelMic.classList.toggle("is-visible", !fileMode);
-      els.panelMic.hidden = fileMode;
-      if (fileMode && micRecognition) {
-        try {
-          micRecognition.stop();
-        } catch {
-          /* ignore */
-        }
-      }
+      els.panelRecord.classList.toggle("is-visible", recordMode);
+      els.panelRecord.hidden = !recordMode;
+      els.panelMic.classList.toggle("is-visible", micMode);
+      els.panelMic.hidden = !micMode;
     });
   });
 }
@@ -704,6 +898,7 @@ function setupFileUi() {
       showError("오디오 파일을 선택해 주세요.");
       return;
     }
+    setOutput("", { skipSummary: true });
     selectedFile = file;
     els.fileName.textContent = `선택됨: ${file.name}`;
     els.fileName.hidden = false;
@@ -780,23 +975,52 @@ function setupMic() {
         /* ignore */
       }
     }
+    setOutput("", { skipSummary: true });
+    micCommittedRaw = "";
+    micLastFinalIdx = -1;
     micRecognition = new SpeechRecognition();
     micRecognition.lang = "ko-KR";
     micRecognition.continuous = true;
     micRecognition.interimResults = true;
-
-    let finalText = els.output.value.trim();
+    micRecognition.maxAlternatives = 1;
 
     micRecognition.onresult = (event) => {
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const piece = event.results[i][0].transcript;
-        if (event.results[i].isFinal) finalText += (finalText ? " " : "") + piece;
-        else interim += piece;
+      const results = event.results;
+      if (!results?.length) return;
+
+      let i = micLastFinalIdx + 1;
+      while (i < results.length) {
+        const r = results[i];
+        if (!r?.[0]) {
+          i += 1;
+          continue;
+        }
+        if (r.isFinal) {
+          micCommittedRaw += r[0].transcript || "";
+          micLastFinalIdx = i;
+          i += 1;
+        } else {
+          break;
+        }
       }
-      setOutput(finalText + (interim ? (finalText ? " " : "") + interim : ""), {
-        skipSummary: true,
-      });
+
+      let interimRaw = "";
+      for (let j = micLastFinalIdx + 1; j < results.length; j += 1) {
+        const r = results[j];
+        if (!r?.[0] || r.isFinal) continue;
+        interimRaw += r[0].transcript || "";
+      }
+
+      const committed = micCommittedRaw.replace(/\s+/g, " ").trimEnd();
+      const interim = interimRaw.replace(/\s+/g, " ").trim();
+      const display =
+        interim && committed
+          ? `${committed} ${interim}`
+          : interim || committed;
+
+      if (els.output.value !== display) {
+        setOutput(display, { skipSummary: true });
+      }
     };
 
     micRecognition.onerror = (e) => {
@@ -830,6 +1054,196 @@ function setupMic() {
         /* ignore */
       }
     }
+  });
+}
+
+function setupRecordUi() {
+  if (typeof MediaRecorder === "undefined") {
+    if (els.btnRecordStart) els.btnRecordStart.disabled = true;
+    if (els.btnRecordTranscribe) els.btnRecordTranscribe.disabled = true;
+    if (els.recordStatus) {
+      els.recordStatus.textContent =
+        "이 브라우저는 MediaRecorder 녹음을 지원하지 않습니다. Chrome 또는 Edge를 사용해 주세요.";
+    }
+    return;
+  }
+
+  els.btnRecordStart?.addEventListener("click", async () => {
+    if (recordMediaRecorder && recordMediaRecorder.state === "recording") return;
+    showError("");
+    recordDiscardOnStop = false;
+    recordChunks = [];
+    setOutput("", { skipSummary: true });
+    clearLastRecordedAudio();
+    try {
+      recordStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: { ideal: 1 },
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
+        },
+      });
+    } catch (e) {
+      console.error(e);
+      showError("마이크 권한이 필요합니다. 브라우저 설정을 확인해 주세요.");
+      if (els.recordStatus) els.recordStatus.textContent = "마이크를 사용할 수 없습니다.";
+      return;
+    }
+
+    let recorder;
+    const candidates = ["audio/webm;codecs=opus", "audio/webm"];
+    for (const mimeType of candidates) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        try {
+          recorder = new MediaRecorder(recordStream, {
+            mimeType,
+            audioBitsPerSecond: 128000,
+          });
+          break;
+        } catch {
+          try {
+            recorder = new MediaRecorder(recordStream, { mimeType });
+            break;
+          } catch {
+            /* try next mime */
+          }
+        }
+      }
+    }
+    if (!recorder) {
+      try {
+        recorder = new MediaRecorder(recordStream, {
+          audioBitsPerSecond: 128000,
+        });
+      } catch {
+        try {
+          recorder = new MediaRecorder(recordStream);
+        } catch (e) {
+          console.error(e);
+          stopRecordStreamTracks();
+          showError("녹음기를 시작할 수 없습니다.");
+          if (els.recordStatus)
+            els.recordStatus.textContent = "녹음을 시작할 수 없습니다.";
+          return;
+        }
+      }
+    }
+
+    recordMediaRecorder = recorder;
+    recordMediaRecorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) recordChunks.push(ev.data);
+    };
+    recordMediaRecorder.onerror = (ev) => {
+      console.error(ev.error || ev);
+      showError("녹음 중 오류가 발생했습니다.");
+    };
+    recordMediaRecorder.onstop = async () => {
+      stopRecordStreamTracks();
+      const mr = recordMediaRecorder;
+      const mime = mr?.mimeType || "audio/webm";
+      recordMediaRecorder = null;
+
+      if (recordDiscardOnStop) {
+        recordDiscardOnStop = false;
+        recordChunks = [];
+        resetRecordUiIdle();
+        clearLastRecordedAudio();
+        if (els.recordStatus) els.recordStatus.textContent = "녹음을 취소했습니다.";
+        return;
+      }
+
+      const blob = new Blob(recordChunks, { type: mime });
+      recordChunks = [];
+      resetRecordUiIdle();
+
+      if (!blob.size) {
+        clearLastRecordedAudio();
+        if (els.recordStatus) els.recordStatus.textContent = "녹음 데이터가 없습니다.";
+        showError("녹음이 너무 짧거나 비어 있습니다.");
+        return;
+      }
+
+      rememberLastRecordedAudio(blob, mime);
+
+      if (els.recordStatus) {
+        els.recordStatus.textContent =
+          "녹음이 준비되었습니다. 저장이 필요하면 「녹음 파일 저장」, 텍스트는 「텍스트 변환」을 눌러 주세요.";
+      }
+    };
+
+    try {
+      recordMediaRecorder.start(250);
+    } catch (e) {
+      console.error(e);
+      stopRecordStreamTracks();
+      recordMediaRecorder = null;
+      recordChunks = [];
+      resetRecordUiIdle();
+      showError("녹음을 시작할 수 없습니다.");
+      if (els.recordStatus) els.recordStatus.textContent = "녹음을 시작할 수 없습니다.";
+      return;
+    }
+
+    if (els.btnRecordStart) els.btnRecordStart.disabled = true;
+    if (els.btnRecordStop) els.btnRecordStop.disabled = false;
+    if (els.recordStatus) {
+      els.recordStatus.textContent = "녹음 중… 종료하면 메모리에 보관됩니다.";
+    }
+  });
+
+  els.btnRecordTranscribe?.addEventListener("click", async () => {
+    if (!lastRecordedAudioBlob?.size) return;
+    showError("");
+    setOutput("", { skipSummary: true });
+    const mime = lastRecordedAudioBlob.type || "audio/webm";
+    const nameStem = `recording_${defaultDownloadBasename()}`;
+    const ext = lastRecordedAudioExt || extFromAudioMime(mime);
+    const file = new File(
+      [lastRecordedAudioBlob],
+      `${nameStem}.${ext}`,
+      { type: mime }
+    );
+    if (els.btnRecordTranscribe) els.btnRecordTranscribe.disabled = true;
+    if (els.btnRecordStart) els.btnRecordStart.disabled = true;
+    try {
+      await transcribeFile(file);
+      if (els.recordStatus) {
+        els.recordStatus.textContent = "변환 완료. 아래 변환 결과·요약을 확인하세요.";
+      }
+    } catch (err) {
+      console.error(err);
+      showError(
+        err?.message
+          ? `변환 실패: ${err.message}`
+          : "변환에 실패했습니다. 네트워크와 녹음 형식을 확인해 주세요."
+      );
+      if (els.recordStatus) els.recordStatus.textContent = "변환에 실패했습니다.";
+    } finally {
+      if (els.btnRecordTranscribe) els.btnRecordTranscribe.disabled = false;
+      if (els.btnRecordStart) els.btnRecordStart.disabled = false;
+    }
+  });
+
+  els.btnRecordStop?.addEventListener("click", () => {
+    if (!recordMediaRecorder || recordMediaRecorder.state !== "recording") return;
+    recordDiscardOnStop = false;
+    if (els.recordStatus) els.recordStatus.textContent = "녹음을 마무리하는 중…";
+    if (els.btnRecordStop) els.btnRecordStop.disabled = true;
+    try {
+      recordMediaRecorder.stop();
+    } catch (e) {
+      console.error(e);
+      stopRecordStreamTracks();
+      resetRecordUiIdle();
+      clearLastRecordedAudio();
+      showError("녹음 종료에 실패했습니다.");
+      if (els.recordStatus) els.recordStatus.textContent = "녹음 종료에 실패했습니다.";
+    }
+  });
+
+  els.btnSaveRecording?.addEventListener("click", () => {
+    void saveLastRecordedAudio();
   });
 }
 
@@ -958,6 +1372,7 @@ function warnIfFileProtocol() {
 
 setupTabs();
 setupFileUi();
+setupRecordUi();
 setupMic();
 setupSaveDialog();
 setupThemeToggle();

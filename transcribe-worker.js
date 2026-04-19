@@ -38,11 +38,13 @@ function getTranscriber(modelKey, modelId) {
   return pipelinePromise;
 }
 
-self.onmessage = async (ev) => {
-  const msg = ev.data;
-  if (msg?.type !== "transcribe") return;
+/** async onmessage는 겹쳐 실행될 수 있어, 같은 파이프라인에 동시 추론이 걸리지 않도록 직렬화 */
+let transcribeJobChain = Promise.resolve();
 
-  /** 메인 스레드에서 만든 16kHz 모노 Float32Array (Worker에는 AudioContext 없음) */
+/**
+ * @param {{ modelKey: string, modelId: string, options?: object, raw: ArrayBufferLike, jobId: string }} msg
+ */
+async function runTranscribeJob(msg) {
   const { modelKey, modelId, options, raw, jobId } = msg;
 
   try {
@@ -61,4 +63,15 @@ self.onmessage = async (ev) => {
       message: err?.message || String(err),
     });
   }
+}
+
+self.onmessage = (ev) => {
+  const msg = ev.data;
+  if (msg?.type !== "transcribe") return;
+
+  transcribeJobChain = transcribeJobChain
+    .then(() => runTranscribeJob(msg))
+    .catch((err) => {
+      console.error(err);
+    });
 };

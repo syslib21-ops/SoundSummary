@@ -99,7 +99,9 @@ body {
 }
 
 .app {
+  width: 100%;
   max-width: 760px;
+  min-width: 0;
   margin: 0 auto;
   padding-top: max(clamp(1.5rem, 4vw, 2.75rem), env(safe-area-inset-top, 0px));
   padding-right: max(clamp(1rem, 3vw, 1.5rem), env(safe-area-inset-right, 0px));
@@ -238,6 +240,8 @@ body {
 }
 
 .card {
+  width: 100%;
+  min-width: 0;
   padding: 1.25rem 1.35rem;
   background: var(--card-bg);
   border: 1px solid var(--border);
@@ -261,6 +265,7 @@ body {
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.35rem;
   margin-bottom: 1.35rem;
   padding: 0.35rem;
@@ -271,7 +276,8 @@ body {
 }
 
 .tab {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -318,6 +324,8 @@ body {
 
 .panel {
   display: none;
+  width: 100%;
+  min-width: 0;
   margin-bottom: 1.35rem;
 }
 
@@ -627,11 +635,16 @@ body {
 }
 
 .output-section {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
   margin-top: 0.25rem;
 }
 
 .output-edit-hint {
-  margin: 0.55rem 0 0;
+  margin: 0 0 0.65rem;
   font-size: 0.76rem;
   line-height: 1.5;
   color: var(--muted);
@@ -643,6 +656,8 @@ body {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.6rem 0.85rem;
+  width: 100%;
+  min-width: 0;
   margin-bottom: 0.65rem;
 }
 
@@ -662,6 +677,11 @@ body {
 }
 
 .summary-section {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
   margin-top: 1.25rem;
 }
 
@@ -679,6 +699,8 @@ body {
 }
 
 .summary-core-block {
+  width: 100%;
+  min-width: 0;
   margin-top: 1.1rem;
   padding-top: 1rem;
   border-top: 1px solid var(--border);
@@ -703,8 +725,11 @@ body {
 }
 
 .output {
+  display: block;
   width: 100%;
+  min-width: 0;
   max-width: 100%;
+  box-sizing: border-box;
   padding: 1rem 1.15rem;
   font-family: var(--font-mono), var(--font-sans);
   font-size: 0.875rem;
@@ -831,6 +856,10 @@ body {
 }
 
 textarea.output {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  align-self: stretch;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }

@@ -34,7 +34,7 @@
         <div class="header-main">
           <p class="eyebrow">로컬 변환 · Web Worker</p>
           <h1 class="title">음성 <span class="title-arrow">→</span> 텍스트</h1>
-          <p class="subtitle">녹음 파일을 올리거나 마이크로 말하면 텍스트로 변환합니다.</p>
+          <p class="subtitle">파일 업로드·브라우저 녹음·마이크 실시간 입력을 텍스트로 변환합니다.</p>
         </div>
         <div class="theme-switch" role="group" aria-label="화면 테마">
           <button type="button" class="theme-switch__btn is-active" id="themeDark" data-set-theme="dark" aria-pressed="true">다크</button>
@@ -44,9 +44,32 @@
     </header>
 
     <nav class="tabs" role="tablist" aria-label="입력 방식">
-      <button type="button" class="tab is-active" data-tab="file" role="tab" aria-selected="true">파일 업로드</button>
       <button type="button" class="tab" data-tab="mic" role="tab" aria-selected="false">마이크 (실시간)</button>
+      <button type="button" class="tab" data-tab="record" role="tab" aria-selected="false">음성 녹음</button>
+      <button type="button" class="tab is-active" data-tab="file" role="tab" aria-selected="true">파일 업로드</button>
     </nav>
+
+    <section id="panel-mic" class="panel card" role="tabpanel" hidden>
+      <p class="mic-hint">Chrome·Edge 권장. 브라우저가 마이크 권한을 요청합니다.</p>
+      <div class="row">
+        <button type="button" class="btn btn-primary" id="btnMicStart">듣기 시작</button>
+        <button type="button" class="btn btn-danger" id="btnMicStop" disabled>중지</button>
+      </div>
+      <p id="micStatus" class="status" aria-live="polite"></p>
+    </section>
+
+    <section id="panel-record" class="panel card" role="tabpanel" hidden>
+      <p class="mic-hint">
+        <strong>녹음 종료</strong> 후 필요하면 <strong>녹음 파일 저장</strong>으로 오디오를 내려받고, <strong>텍스트 변환</strong>을 누르면 파일 업로드 탭과 같은 Whisper 변환이 실행되어 하단 <strong>변환 결과</strong>에 텍스트가 나옵니다. 인식 모델·긴 녹음 옵션은 파일 업로드 탭 설정을 따르며, 변환 언어는 <strong>한국어</strong>로 고정됩니다.
+      </p>
+      <div class="row">
+        <button type="button" class="btn btn-primary" id="btnRecordStart">녹음 시작</button>
+        <button type="button" class="btn btn-danger" id="btnRecordStop" disabled>녹음 종료</button>
+        <button type="button" class="btn btn-ghost" id="btnSaveRecording" disabled>녹음 파일 저장</button>
+        <button type="button" class="btn btn-primary" id="btnRecordTranscribe" disabled>텍스트 변환</button>
+      </div>
+      <p id="recordStatus" class="status" aria-live="polite"></p>
+    </section>
 
     <section id="panel-file" class="panel is-visible card" role="tabpanel">
       <label class="dropzone" id="dropzone">
@@ -71,17 +94,10 @@
           </select>
         </label>
         <label class="field">
-          <span class="field-label">언어</span>
-          <select id="languageSelect" class="select">
-            <option value="auto" selected>자동 감지</option>
-            <option value="korean">한국어로 고정</option>
-            <option value="english">영어로 고정</option>
-          </select>
-        </label>
-        <label class="field">
           <span class="field-label">긴 녹음 처리</span>
           <select id="speedSelect" class="select">
-            <option value="balanced" selected>균형 (겹침 5초)</option>
+            <option value="quality">품질 우선 (겹침 10초, 느림)</option>
+            <option value="balanced" selected>균형 (겹침 6초)</option>
             <option value="fast">속도 우선 (겹침 2초)</option>
           </select>
         </label>
@@ -92,17 +108,8 @@
       </div>
       <p class="note">
         변환은 <strong>Worker</strong>에서 수행됩니다. <strong>http(s)</strong>로 열어 주세요. 첫 실행 시 모델 다운로드(base 약 150MB)가 필요합니다.
-        <strong>속도</strong>: 모델을 <strong>tiny</strong>로 하거나 「긴 녹음 처리 → 속도 우선」을 선택하면 긴 파일에서 청크 겹침 연산이 줄어듭니다. 서버에 <code>Cross-Origin-Opener-Policy</code>·<code>Cross-Origin-Embedder-Policy</code>를 넣으면 WASM 멀티스레드로 더 빨라질 수 있습니다.
+        <strong>정확도</strong>: 변환 언어는 <strong>한국어</strong>로 고정되어 있습니다. 긴 파일은 「품질 우선」과 <strong>small</strong> 모델이 유리한 경우가 많습니다. <strong>속도</strong>: <strong>tiny</strong>나 「속도 우선」은 청크 겹침 연산이 줄어듭니다. 서버에 <code>Cross-Origin-Opener-Policy</code>·<code>Cross-Origin-Embedder-Policy</code>를 넣으면 WASM 멀티스레드로 더 빨라질 수 있습니다.
       </p>
-    </section>
-
-    <section id="panel-mic" class="panel card" role="tabpanel" hidden>
-      <p class="mic-hint">Chrome·Edge 권장. 브라우저가 마이크 권한을 요청합니다.</p>
-      <div class="row">
-        <button type="button" class="btn btn-primary" id="btnMicStart">듣기 시작</button>
-        <button type="button" class="btn btn-danger" id="btnMicStop" disabled>중지</button>
-      </div>
-      <p id="micStatus" class="status" aria-live="polite"></p>
     </section>
 
     <div id="progressWrap" class="progress-wrap card card--compact" hidden>
@@ -118,10 +125,10 @@
           <button type="button" class="btn btn-ghost btn-small" id="btnSaveFull" disabled>저장(.txt)</button>
         </div>
       </div>
-      <textarea id="output" class="output" rows="12" placeholder="여기에 변환된 텍스트가 표시됩니다. 직접 수정한 뒤 아래 핵심 요약에서 「요약 다시」를 누르면 반영됩니다."></textarea>
       <p class="output-edit-hint">
         <strong>변환 결과</strong>는 바로 고칠 수 있습니다. 수정 후 <strong>요약 다시</strong>를 누르면 <strong>핵심 요약</strong>·<strong>핵심의 핵심</strong>이 고친 글 기준으로 다시 만들어집니다.
       </p>
+      <textarea id="output" class="output" rows="12" placeholder="여기에 변환된 텍스트가 표시됩니다. 직접 수정한 뒤 아래 핵심 요약에서 「요약 다시」를 누르면 반영됩니다."></textarea>
     </section>
 
     <section class="summary-section card card--accent">
