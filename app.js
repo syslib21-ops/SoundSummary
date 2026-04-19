@@ -472,7 +472,10 @@ function loadLameJsModule() {
     lamejsModulePromise = import(
       /* webpackIgnore: true */
       "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/+esm"
-    );
+    ).catch((err) => {
+      console.warn("lamejs jsDelivr 로드 실패, esm.sh로 재시도:", err);
+      return import(/* webpackIgnore: true */ "https://esm.sh/lamejs@1.2.1");
+    });
   }
   return lamejsModulePromise;
 }
@@ -551,18 +554,22 @@ async function recordingBlobToMp3Blob(blob) {
   const enc = new Mp3Encoder(1, MP3_ENCODE_SAMPLE_RATE, 128);
   const block = 1152;
   const parts = [];
-  for (let i = 0; i < pcm16.length; i += block) {
-    let slice = pcm16.subarray(i, i + block);
-    if (slice.length < block) {
-      const padded = new Int16Array(block);
-      padded.set(slice);
-      slice = padded;
-    }
-    const buf = enc.encodeBuffer(slice);
+  let i = 0;
+  for (; i + block <= pcm16.length; i += block) {
+    const buf = enc.encodeBuffer(pcm16.subarray(i, i + block));
     if (buf?.length > 0) parts.push(new Uint8Array(buf));
   }
-  const tail = enc.flush();
-  if (tail?.length > 0) parts.push(new Uint8Array(tail));
+  if (i < pcm16.length) {
+    const rest = pcm16.subarray(i);
+    try {
+      const buf = enc.encodeBuffer(rest);
+      if (buf?.length > 0) parts.push(new Uint8Array(buf));
+    } catch {
+      /* 짧은 꼬리 구간은 일부 환경에서 예외 → flush만으로 마무리 */
+    }
+  }
+  const end = enc.flush();
+  if (end?.length > 0) parts.push(new Uint8Array(end));
   return new Blob(parts, { type: "audio/mpeg" });
 }
 
@@ -570,19 +577,29 @@ async function saveLastRecordedAudio() {
   if (!lastRecordedAudioBlob || !lastRecordedAudioBlob.size) return;
   if (els.btnSaveRecording) els.btnSaveRecording.disabled = true;
   showError("");
+  if (els.recordStatus) {
+    els.recordStatus.textContent = "MP3로 변환하는 중… 잠시만 기다려 주세요.";
+  }
   try {
     const mp3Blob = await recordingBlobToMp3Blob(lastRecordedAudioBlob);
     if (!mp3Blob?.size) {
-      showError("MP3 변환 결과가 비어 있습니다.");
-      return;
+      throw new Error("MP3 변환 결과가 비어 있습니다.");
     }
     const suggested = `음성녹음_${defaultDownloadBasename()}.mp3`;
     const native = await trySaveBlobWithNativePicker(mp3Blob, suggested, "mp3");
-    if (native === "saved" || native === "aborted") return;
+    if (native === "saved" || native === "aborted") {
+      if (els.recordStatus && native === "saved") {
+        els.recordStatus.textContent = "MP3 파일을 저장했습니다.";
+      }
+      return;
+    }
     saveBlobAsDownload(
       sanitizeAudioDownloadFileName(suggested, "mp3"),
       mp3Blob
     );
+    if (els.recordStatus) {
+      els.recordStatus.textContent = "MP3 파일을 다운로드했습니다.";
+    }
   } catch (e) {
     console.error(e);
     showError(
@@ -590,6 +607,37 @@ async function saveLastRecordedAudio() {
         ? `MP3 저장 실패: ${e.message}`
         : "MP3 저장에 실패했습니다. 네트워크(CDN)와 녹음 형식을 확인해 주세요."
     );
+    if (els.recordStatus) {
+      els.recordStatus.textContent =
+        "MP3 변환에 실패했습니다. 녹음 원본 형식으로 저장을 시도합니다.";
+    }
+    try {
+      const ext = lastRecordedAudioExt || "webm";
+      const suggested = `음성녹음_${defaultDownloadBasename()}.${ext}`;
+      const native = await trySaveBlobWithNativePicker(
+        lastRecordedAudioBlob,
+        suggested,
+        ext
+      );
+      if (native === "saved" || native === "aborted") return;
+      saveBlobAsDownload(
+        sanitizeAudioDownloadFileName(suggested, ext),
+        lastRecordedAudioBlob
+      );
+      if (els.recordStatus) {
+        els.recordStatus.textContent = `원본(.${ext})으로 저장했습니다.`;
+      }
+    } catch (e2) {
+      console.error(e2);
+      showError(
+        e2?.message
+          ? `파일 저장 실패: ${e2.message}`
+          : "파일을 저장하지 못했습니다."
+      );
+      if (els.recordStatus) {
+        els.recordStatus.textContent = "저장에 실패했습니다.";
+      }
+    }
   } finally {
     if (els.btnSaveRecording) els.btnSaveRecording.disabled = false;
   }
@@ -705,14 +753,38 @@ function defaultDownloadBasename() {
 }
 
 /**
+ * Whisper가 침묵·말끝 뒤에서 같은 짧은 구절을 수십 번 반복하는 환각을 줄입니다.
+ * (짧은 구문 + 공백으로 구분된 동일 구문이 5회 이상 이어질 때 1회로 압축)
+ * @param {string} text
+ */
+function collapseAdjacentPhraseRepeats(text) {
+  let s = String(text || "").replace(/\s+/g, " ").trim();
+  if (s.length < 24) return s;
+  for (let iter = 0; iter < 100; iter += 1) {
+    const re = /(.{5,45}?)(\s+\1){4,}/gu;
+    re.lastIndex = 0;
+    const m = re.exec(s);
+    if (!m) break;
+    s = `${s.slice(0, m.index)}${m[1]}${s.slice(m.index + m[0].length)}`
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  return s;
+}
+
+/**
  * Whisper 파이프라인 반환값을 한 덩어리 문자열로 정리합니다.
  * 긴 오디오는 chunks만 채이거나 text와 함께 올 수 있어, 짧은 쪽만 쓰면 누락이 납니다.
  */
 function normalizeAsrResult(result) {
   if (result == null) return "";
-  if (typeof result === "string") return result.trim();
+  if (typeof result === "string") {
+    return collapseAdjacentPhraseRepeats(result.trim());
+  }
   if (Array.isArray(result)) {
-    return result.map(normalizeAsrResult).filter(Boolean).join(" ").trim();
+    return collapseAdjacentPhraseRepeats(
+      result.map(normalizeAsrResult).filter(Boolean).join(" ").trim()
+    );
   }
   const top = typeof result.text === "string" ? result.text.trim() : "";
   const chunks = result.chunks;
@@ -724,11 +796,13 @@ function normalizeAsrResult(result) {
       .join(" ")
       .trim();
     if (fromChunks && top) {
-      return fromChunks.length >= top.length ? fromChunks : top;
+      return collapseAdjacentPhraseRepeats(
+        fromChunks.length >= top.length ? fromChunks : top
+      );
     }
-    if (fromChunks) return fromChunks;
+    if (fromChunks) return collapseAdjacentPhraseRepeats(fromChunks);
   }
-  return top;
+  return collapseAdjacentPhraseRepeats(top);
 }
 
 function getSelectedModelId() {
@@ -746,6 +820,10 @@ function getTranscribeOptions(durationSec) {
   const opts = {
     task: "transcribe",
     language: "korean",
+    // 침묵·저신뢰 구간 반복 환각 완화(transformers가 무시하면 영향 없음)
+    no_speech_threshold: 0.68,
+    compression_ratio_threshold: 2.0,
+    logprob_threshold: -0.85,
   };
   const longForm =
     durationSec == null || !Number.isFinite(durationSec) || durationSec > 28;
