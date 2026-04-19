@@ -404,17 +404,18 @@ function extFromAudioMime(mime) {
   if (m.includes("webm")) return "webm";
   if (m.includes("ogg")) return "ogg";
   if (m.includes("mp4") || m.includes("mpeg")) return "mp4";
+  if (m.includes("wav")) return "wav";
   return "webm";
 }
 
-/** 녹음 등 바이너리 파일명 (.webm·.ogg 등) */
+/** 녹음 등 바이너리 파일명 (.mp3·.webm 등) */
 function sanitizeAudioDownloadFileName(name, extFallback) {
   const ext = extFallback || "webm";
   let s = basenameFromPath(String(name || "").trim());
   if (!s) s = `음성녹음_${defaultDownloadBasename()}.${ext}`;
   s = s.replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim();
   const low = s.toLowerCase();
-  const ok = [".webm", ".ogg", ".opus", ".mp4", ".m4a"];
+  const ok = [".mp3", ".wav", ".webm", ".ogg", ".opus", ".mp4", ".m4a"];
   if (!ok.some((a) => low.endsWith(a))) {
     const base = s.replace(/\.[^/.]+$/, "");
     s = `${base || `음성녹음_${defaultDownloadBasename()}`}.${ext}`;
@@ -424,19 +425,27 @@ function sanitizeAudioDownloadFileName(name, extFallback) {
 }
 
 /**
+ * @param {string | undefined} extOverride 저장 파일 확장자(예: mp3). 없으면 `lastRecordedAudioExt`.
  * @returns {Promise<"saved"|"aborted"|"noapi"|"failed">}
  */
-async function trySaveBlobWithNativePicker(blob, suggestedName) {
+async function trySaveBlobWithNativePicker(blob, suggestedName, extOverride) {
   const picker = window.showSaveFilePicker;
   if (typeof picker !== "function") return "noapi";
-  const ext = lastRecordedAudioExt || "webm";
+  const ext = extOverride ?? lastRecordedAudioExt ?? "mp3";
   try {
     const handle = await picker.call(window, {
       suggestedName: sanitizeAudioDownloadFileName(suggestedName, ext),
       types: [
         {
-          description: "오디오",
+          description: "MP3",
           accept: {
+            "audio/mpeg": [".mp3"],
+          },
+        },
+        {
+          description: "기타 오디오",
+          accept: {
+            "audio/wav": [".wav"],
             "audio/webm": [".webm"],
             "audio/ogg": [".ogg", ".opus"],
             "audio/mp4": [".m4a", ".mp4"],
@@ -455,18 +464,135 @@ async function trySaveBlobWithNativePicker(blob, suggestedName) {
   }
 }
 
+/** lamejs 동적 로드(녹음 → MP3) */
+let lamejsModulePromise = null;
+
+function loadLameJsModule() {
+  if (!lamejsModulePromise) {
+    lamejsModulePromise = import(
+      /* webpackIgnore: true */
+      "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/+esm"
+    );
+  }
+  return lamejsModulePromise;
+}
+
+/** MP3 인코딩용 샘플레이트(lamejs 권장) */
+const MP3_ENCODE_SAMPLE_RATE = 44100;
+
+function floatTo16BitPcmMono(float32) {
+  const n = float32.length;
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const x = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = x < 0 ? x * 0x8000 : x * 0x7fff;
+  }
+  return out;
+}
+
+/**
+ * 녹음 Blob(WebM 등) → 지정 샘플레이트 모노 Float32
+ * @param {Blob} blob
+ * @param {number} sampleRate
+ */
+async function decodeRecordingBlobToMonoPcm(blob, sampleRate) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error("AudioContext를 사용할 수 없습니다.");
+  const ctx = new AC();
+  try {
+    const ab = await blob.arrayBuffer();
+    const decoded = await ctx.decodeAudioData(ab.slice(0));
+    const len = decoded.length;
+    const nCh = decoded.numberOfChannels;
+    const monoAtSource = new Float32Array(len);
+    if (nCh === 1) {
+      monoAtSource.set(decoded.getChannelData(0));
+    } else {
+      for (let i = 0; i < len; i += 1) {
+        let s = 0;
+        for (let c = 0; c < nCh; c += 1) s += decoded.getChannelData(c)[i];
+        monoAtSource[i] = s / nCh;
+      }
+    }
+    const monoBuf = ctx.createBuffer(1, len, decoded.sampleRate);
+    monoBuf.copyToChannel(monoAtSource, 0);
+    const duration = decoded.duration;
+    const outFrames = Math.max(1, Math.ceil(duration * sampleRate));
+    const offline = new OfflineAudioContext(1, outFrames, sampleRate);
+    const src = offline.createBufferSource();
+    src.buffer = monoBuf;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    return rendered.getChannelData(0);
+  } finally {
+    await ctx.close();
+  }
+}
+
+/**
+ * MediaRecorder 원본 Blob을 브라우저에서 MP3로 인코딩합니다.
+ * @param {Blob} blob
+ */
+async function recordingBlobToMp3Blob(blob) {
+  const mod = await loadLameJsModule();
+  const Mp3Encoder =
+    mod.Mp3Encoder ||
+    mod.default?.Mp3Encoder ||
+    (mod.default && typeof mod.default === "object" && mod.default.Mp3Encoder);
+  if (typeof Mp3Encoder !== "function") {
+    throw new Error("MP3 인코더(lamejs)를 불러오지 못했습니다.");
+  }
+
+  const pcmF = await decodeRecordingBlobToMonoPcm(blob, MP3_ENCODE_SAMPLE_RATE);
+  if (!pcmF.length) throw new Error("디코딩된 오디오가 비어 있습니다.");
+
+  const pcm16 = floatTo16BitPcmMono(pcmF);
+  const enc = new Mp3Encoder(1, MP3_ENCODE_SAMPLE_RATE, 128);
+  const block = 1152;
+  const parts = [];
+  for (let i = 0; i < pcm16.length; i += block) {
+    let slice = pcm16.subarray(i, i + block);
+    if (slice.length < block) {
+      const padded = new Int16Array(block);
+      padded.set(slice);
+      slice = padded;
+    }
+    const buf = enc.encodeBuffer(slice);
+    if (buf?.length > 0) parts.push(new Uint8Array(buf));
+  }
+  const tail = enc.flush();
+  if (tail?.length > 0) parts.push(new Uint8Array(tail));
+  return new Blob(parts, { type: "audio/mpeg" });
+}
+
 async function saveLastRecordedAudio() {
   if (!lastRecordedAudioBlob || !lastRecordedAudioBlob.size) return;
-  const suggested = `음성녹음_${defaultDownloadBasename()}.${lastRecordedAudioExt}`;
-  const native = await trySaveBlobWithNativePicker(
-    lastRecordedAudioBlob,
-    suggested
-  );
-  if (native === "saved" || native === "aborted") return;
-  saveBlobAsDownload(
-    sanitizeAudioDownloadFileName(suggested, lastRecordedAudioExt),
-    lastRecordedAudioBlob
-  );
+  if (els.btnSaveRecording) els.btnSaveRecording.disabled = true;
+  showError("");
+  try {
+    const mp3Blob = await recordingBlobToMp3Blob(lastRecordedAudioBlob);
+    if (!mp3Blob?.size) {
+      showError("MP3 변환 결과가 비어 있습니다.");
+      return;
+    }
+    const suggested = `음성녹음_${defaultDownloadBasename()}.mp3`;
+    const native = await trySaveBlobWithNativePicker(mp3Blob, suggested, "mp3");
+    if (native === "saved" || native === "aborted") return;
+    saveBlobAsDownload(
+      sanitizeAudioDownloadFileName(suggested, "mp3"),
+      mp3Blob
+    );
+  } catch (e) {
+    console.error(e);
+    showError(
+      e?.message
+        ? `MP3 저장 실패: ${e.message}`
+        : "MP3 저장에 실패했습니다. 네트워크(CDN)와 녹음 형식을 확인해 주세요."
+    );
+  } finally {
+    if (els.btnSaveRecording) els.btnSaveRecording.disabled = false;
+  }
 }
 
 function rememberLastRecordedAudio(blob, mime) {
