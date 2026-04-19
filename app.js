@@ -469,12 +469,18 @@ let lamejsModulePromise = null;
 
 function loadLameJsModule() {
   if (!lamejsModulePromise) {
+    /** 동일 출처 `vendor/lamejs.mjs` 우선 — CDN만 쓰면 오프라인·CSP·file:// 에서 MP3가 실패하기 쉬움 */
     lamejsModulePromise = import(
-      /* webpackIgnore: true */
-      "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/+esm"
+      new URL("./vendor/lamejs.mjs", import.meta.url)
     ).catch((err) => {
-      console.warn("lamejs jsDelivr 로드 실패, esm.sh로 재시도:", err);
-      return import(/* webpackIgnore: true */ "https://esm.sh/lamejs@1.2.1");
+      console.warn("로컬 lamejs 로드 실패, CDN으로 재시도:", err);
+      return import(
+        /* webpackIgnore: true */
+        "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/+esm"
+      ).catch((err2) => {
+        console.warn("jsDelivr 실패, esm.sh로 재시도:", err2);
+        return import(/* webpackIgnore: true */ "https://esm.sh/lamejs@1.2.1");
+      });
     });
   }
   return lamejsModulePromise;
@@ -503,6 +509,7 @@ async function decodeRecordingBlobToMonoPcm(blob, sampleRate) {
   if (!AC) throw new Error("AudioContext를 사용할 수 없습니다.");
   const ctx = new AC();
   try {
+    await ctx.resume().catch(() => {});
     const ab = await blob.arrayBuffer();
     const decoded = await ctx.decodeAudioData(ab.slice(0));
     const len = decoded.length;
@@ -539,10 +546,7 @@ async function decodeRecordingBlobToMonoPcm(blob, sampleRate) {
  */
 async function recordingBlobToMp3Blob(blob) {
   const mod = await loadLameJsModule();
-  const Mp3Encoder =
-    mod.Mp3Encoder ||
-    mod.default?.Mp3Encoder ||
-    (mod.default && typeof mod.default === "object" && mod.default.Mp3Encoder);
+  const Mp3Encoder = mod.Mp3Encoder;
   if (typeof Mp3Encoder !== "function") {
     throw new Error("MP3 인코더(lamejs)를 불러오지 못했습니다.");
   }
@@ -570,6 +574,9 @@ async function recordingBlobToMp3Blob(blob) {
   }
   const end = enc.flush();
   if (end?.length > 0) parts.push(new Uint8Array(end));
+  if (!parts.length) {
+    throw new Error("MP3 인코딩 결과가 비어 있습니다.");
+  }
   return new Blob(parts, { type: "audio/mpeg" });
 }
 
@@ -602,14 +609,9 @@ async function saveLastRecordedAudio() {
     }
   } catch (e) {
     console.error(e);
-    showError(
-      e?.message
-        ? `MP3 저장 실패: ${e.message}`
-        : "MP3 저장에 실패했습니다. 네트워크(CDN)와 녹음 형식을 확인해 주세요."
-    );
     if (els.recordStatus) {
       els.recordStatus.textContent =
-        "MP3 변환에 실패했습니다. 녹음 원본 형식으로 저장을 시도합니다.";
+        "MP3로 저장할 수 없어 원본 녹음 형식으로 저장을 시도합니다.";
     }
     try {
       const ext = lastRecordedAudioExt || "webm";
@@ -619,13 +621,25 @@ async function saveLastRecordedAudio() {
         suggested,
         ext
       );
-      if (native === "saved" || native === "aborted") return;
+      if (native === "saved") {
+        showError("");
+        if (els.recordStatus) {
+          els.recordStatus.textContent = `MP3는 생략하고 원본(.${ext})으로 저장했습니다.`;
+        }
+        return;
+      }
+      if (native === "aborted") {
+        showError("");
+        if (els.recordStatus) els.recordStatus.textContent = "저장을 취소했습니다.";
+        return;
+      }
       saveBlobAsDownload(
         sanitizeAudioDownloadFileName(suggested, ext),
         lastRecordedAudioBlob
       );
+      showError("");
       if (els.recordStatus) {
-        els.recordStatus.textContent = `원본(.${ext})으로 저장했습니다.`;
+        els.recordStatus.textContent = `MP3는 생략하고 원본(.${ext})으로 다운로드했습니다.`;
       }
     } catch (e2) {
       console.error(e2);
