@@ -464,26 +464,34 @@ async function trySaveBlobWithNativePicker(blob, suggestedName, extOverride) {
   }
 }
 
-/** lamejs 동적 로드(녹음 → MP3) */
-let lamejsModulePromise = null;
+/** 성공 시에만 캐시 — 한 번 import 실패 시 Promise가 영구 reject 되는 문제 방지 */
+let lamejsResolvedModule = null;
 
-function loadLameJsModule() {
-  if (!lamejsModulePromise) {
-    /** 동일 출처 `vendor/lamejs.mjs` 우선 — CDN만 쓰면 오프라인·CSP·file:// 에서 MP3가 실패하기 쉬움 */
-    lamejsModulePromise = import(
-      new URL("./vendor/lamejs.mjs", import.meta.url)
-    ).catch((err) => {
-      console.warn("로컬 lamejs 로드 실패, CDN으로 재시도:", err);
-      return import(
-        /* webpackIgnore: true */
-        "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/+esm"
-      ).catch((err2) => {
-        console.warn("jsDelivr 실패, esm.sh로 재시도:", err2);
-        return import(/* webpackIgnore: true */ "https://esm.sh/lamejs@1.2.1");
-      });
-    });
+async function loadLameJsModule() {
+  if (lamejsResolvedModule) return lamejsResolvedModule;
+  const localCandidates = [new URL("./vendor/lamejs.js", import.meta.url)];
+  for (const url of localCandidates) {
+    try {
+      lamejsResolvedModule = await import(url.href);
+      return lamejsResolvedModule;
+    } catch (err) {
+      console.warn("lamejs 로컬 로드 실패:", url.href, err);
+    }
   }
-  return lamejsModulePromise;
+  try {
+    lamejsResolvedModule = await import(
+      /* webpackIgnore: true */
+      "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/+esm"
+    );
+    return lamejsResolvedModule;
+  } catch (err) {
+    console.warn("lamejs jsDelivr 실패:", err);
+  }
+  lamejsResolvedModule = await import(
+    /* webpackIgnore: true */
+    "https://esm.sh/lamejs@1.2.1"
+  );
+  return lamejsResolvedModule;
 }
 
 /** MP3 인코딩용 샘플레이트(lamejs 권장) */
@@ -546,7 +554,10 @@ async function decodeRecordingBlobToMonoPcm(blob, sampleRate) {
  */
 async function recordingBlobToMp3Blob(blob) {
   const mod = await loadLameJsModule();
-  const Mp3Encoder = mod.Mp3Encoder;
+  const Mp3Encoder =
+    mod.Mp3Encoder ||
+    (mod.default && mod.default.Mp3Encoder) ||
+    (typeof mod.default === "function" ? mod.default : null);
   if (typeof Mp3Encoder !== "function") {
     throw new Error("MP3 인코더(lamejs)를 불러오지 못했습니다.");
   }
@@ -564,12 +575,15 @@ async function recordingBlobToMp3Blob(blob) {
     if (buf?.length > 0) parts.push(new Uint8Array(buf));
   }
   if (i < pcm16.length) {
-    const rest = pcm16.subarray(i);
-    try {
+    let rest = pcm16.subarray(i);
+    if (rest.length > 0 && rest.length < block) {
+      const padded = new Int16Array(block);
+      padded.set(rest);
+      rest = padded;
+    }
+    if (rest.length > 0) {
       const buf = enc.encodeBuffer(rest);
       if (buf?.length > 0) parts.push(new Uint8Array(buf));
-    } catch {
-      /* 짧은 꼬리 구간은 일부 환경에서 예외 → flush만으로 마무리 */
     }
   }
   const end = enc.flush();
